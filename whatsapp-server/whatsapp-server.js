@@ -1,17 +1,12 @@
 const express = require('express');
-const { makeWASocket, DisconnectReason } = require('@whiskeysockets/baileys');
-const Redis = require('ioredis');
+const {
+	makeWASocket,
+	DisconnectReason,
+	useMultiFileAuthState
+} = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const path = require('path');
 const qrcode = require('qrcode-terminal');
-
-// Dynamic imports for ESM modules
-let useRedisAuthStateWithHSet, deleteHSetKeys;
-async function loadESM() {
-	const module = await import('baileys-redis-auth');
-	useRedisAuthStateWithHSet = module.useRedisAuthStateWithHSet;
-	deleteHSetKeys = module.deleteHSetKeys;
-}
 
 // Load environment variables from parent directory .env file
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
@@ -19,25 +14,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 const app = express();
 const PORT = process.env.WHATSAPP_SERVER_PORT || 3182;
 
-// Redis configuration
-const redisOptions = {
-	host: process.env.REDIS_HOST,
-	port: parseInt(process.env.REDIS_PORT || '6379'),
-	password: process.env.REDIS_PASSWORD || undefined
-};
-
-const BAILEYS_AUTH_ID = process.env.BAILEYS_AUTH_ID || 'baileys_session_2';
-
-// Create a shared Redis client
-const redisClient = new Redis(redisOptions);
-
-redisClient.on('error', (err) => {
-	console.error('❌ Redis Error:', err);
-});
-
 console.log('Port:', PORT);
-console.log('Redis Host:', redisOptions.host);
-console.log('Auth ID:', BAILEYS_AUTH_ID);
 
 // CORS middleware
 app.use((req, res, next) => {
@@ -77,17 +54,14 @@ let sock = null;
 
 // Initialize WhatsApp socket with Baileys
 async function initializeWhatsApp() {
-	// Ensure ESM modules are loaded
-	if (!useRedisAuthStateWithHSet) {
-		await loadESM();
-	}
-
-	// Pass the shared redisClient to avoid creating multiple connections
-	const { state, saveCreds } = await useRedisAuthStateWithHSet(redisClient, BAILEYS_AUTH_ID);
+	const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
 
 	sock = makeWASocket({
-		auth: state,
-		printQRInTerminal: false
+		auth: state
+		// printQRInTerminal: false, // Handle manual QR printing
+		// browser: ['WhatsApp Server', 'Chrome', '1.0.0'],
+		// syncFullHistory: false,
+		// markOnlineOnConnect: true
 	});
 
 	// Save credentials when they update
@@ -190,35 +164,18 @@ async function sendWhatsAppMessage(phoneNumber, message) {
 // API Routes - Only message sending functionality
 
 // Get WhatsApp status
-app.get('/whatsapp-status', async (req, res) => {
-	// Ensure ESM modules are loaded
-	if (!useRedisAuthStateWithHSet) {
-		await loadESM();
-	}
-
+app.get('/whatsapp-status', (req, res) => {
 	console.log('📡 Status endpoint called');
 	console.log('🔍 Current status:', whatsappStatus);
 	console.log('🔍 QR Code exists:', qrCode ? 'YES' : 'NO');
 	console.log('🔍 QR Code length:', qrCode ? qrCode.length : 'null');
 	console.log('🔍 Client info:', clientInfo);
 
-	// Check if auth exists in Redis
-	// In baileys-redis-auth with HSET, the key is usually `${sessionId}:auth`
-	let authExists = false;
-	try {
-		const authKey = `${BAILEYS_AUTH_ID}:auth`;
-		const exists = await redisClient.exists(authKey);
-		authExists = exists === 1;
-	} catch (err) {
-		console.error('Error checking auth in Redis:', err);
-	}
-
-	// Also check local folder for legacy support/transition
+	// Check if auth folder exists
 	const fs = require('fs');
+	const path = require('path');
 	const authDir = path.join(__dirname, 'auth_info_baileys');
-	const localAuthExists = fs.existsSync(authDir);
-
-	const finalAuthExists = authExists || localAuthExists;
+	const authExists = fs.existsSync(authDir);
 
 	// Determine control states
 	const canStart =
@@ -238,9 +195,8 @@ app.get('/whatsapp-status', async (req, res) => {
 		pairingCode,
 		canStart: canStart ? true : false,
 		canStop: canStop === true ? true : false,
-		canDeleteAuth: finalAuthExists ? true : false,
-		authExists: finalAuthExists ? true : false,
-		isRedisAuth: authExists,
+		canDeleteAuth: authExists ? true : false,
+		authExists: authExists ? true : false,
 		timestamp: new Date().toISOString()
 	};
 
@@ -427,15 +383,21 @@ app.post('/stop-whatsapp', async (req, res) => {
 	}
 });
 
-// Delete auth data (Redis and local folder)
+// Delete auth folder
 app.post('/delete-auth', async (req, res) => {
-	// Ensure ESM modules are loaded
-	if (!deleteHSetKeys) {
-		await loadESM();
-	}
-
 	try {
-		console.log('🗑️ Deleting auth data...');
+		const fs = require('fs').promises;
+		const path = require('path');
+
+		const authDir = path.join(__dirname, 'auth_info_baileys');
+
+		// Check if auth directory exists - IDEMPOTENT: continue even if it doesn't exist
+		try {
+			await fs.access(authDir);
+		} catch (err) {
+			// Folder doesn't exist, but we should still proceed to reset state
+			console.log('ℹ️ Auth folder does not exist, proceeding to reset state anyway');
+		}
 
 		// Stop WhatsApp if running
 		if (sock) {
@@ -449,19 +411,8 @@ app.post('/delete-auth', async (req, res) => {
 			sock = null;
 		}
 
-		// Delete Redis data
-		try {
-			await deleteHSetKeys({ redis: redisClient, sessionId: BAILEYS_AUTH_ID });
-			console.log(`✅ Redis auth data deleted for session ${BAILEYS_AUTH_ID}`);
-		} catch (err) {
-			console.error('❌ Error deleting Redis auth data:', err);
-		}
-
-		// Delete the local auth directory (if it exists)
-		const fs = require('fs').promises;
-		const authDir = path.join(__dirname, 'auth_info_baileys');
+		// Delete the auth directory
 		await fs.rm(authDir, { recursive: true, force: true });
-		console.log('✅ Local auth folder deleted');
 
 		// Reset all status
 		whatsappStatus = 'auth_deleted';
@@ -473,16 +424,18 @@ app.post('/delete-auth', async (req, res) => {
 			phoneNumber: null
 		};
 
+		console.log('🗑️ Auth folder deleted successfully');
+
 		res.json({
 			success: true,
-			message: 'Auth data deleted from Redis and local storage successfully.',
+			message: 'Auth folder deleted successfully. WhatsApp will need to be re-authenticated.',
 			timestamp: new Date().toISOString()
 		});
 	} catch (error) {
-		console.error('❌ Error deleting auth:', error);
+		console.error('❌ Error deleting auth folder:', error);
 		res.status(500).json({
 			success: false,
-			error: 'Failed to delete authentication data'
+			error: 'Failed to delete auth folder'
 		});
 	}
 });
@@ -497,28 +450,16 @@ app.get('/health', (req, res) => {
 });
 
 // Start server
-const startServer = async () => {
-	try {
-		await loadESM();
-		app.listen(PORT, () => {
-			console.log(`🚀 WhatsApp server running on port ${PORT}`);
-			console.log('📱 This server only handles WhatsApp message delivery');
-			console.log('⚙️  All settings and templates are managed by the main Svelte app');
-			console.log('🔗 Available endpoints:');
-			console.log(
-				'   GET  /whatsapp-status - Check WhatsApp connection status and available actions'
-			);
-			console.log('   POST /start-whatsapp - Start WhatsApp connection and get QR code');
-			console.log('   POST /stop-whatsapp - Stop WhatsApp connection immediately');
-			console.log('   POST /delete-auth - Delete authentication data (requires re-authentication)');
-			console.log('   POST /request-pairing-code - Generate pairing code for authentication');
-			console.log('   POST /send-message - Send custom messages');
-			console.log('   GET  /health - Health check');
-		});
-	} catch (err) {
-		console.error('❌ Failed to start server:', err);
-		process.exit(1);
-	}
-};
-
-startServer();
+app.listen(PORT, () => {
+	console.log(`🚀 WhatsApp server running on port ${PORT}`);
+	console.log('📱 This server only handles WhatsApp message delivery');
+	console.log('⚙️  All settings and templates are managed by the main Svelte app');
+	console.log('🔗 Available endpoints:');
+	console.log('   GET  /whatsapp-status - Check WhatsApp connection status and available actions');
+	console.log('   POST /start-whatsapp - Start WhatsApp connection and get QR code');
+	console.log('   POST /stop-whatsapp - Stop WhatsApp connection immediately');
+	console.log('   POST /delete-auth - Delete authentication data (requires re-authentication)');
+	console.log('   POST /request-pairing-code - Generate pairing code for authentication');
+	console.log('   POST /send-message - Send custom messages');
+	console.log('   GET  /health - Health check');
+});
