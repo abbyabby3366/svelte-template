@@ -23,8 +23,8 @@ async function makeWhatsAppRequest(endpoint: string, options: RequestInit = {}) 
 		}
 
 		return await response.json();
-	} catch (error) {
-		console.error('Error communicating with WhatsApp server:', error.message);
+	} catch (error: unknown) {
+		console.error('Error communicating with WhatsApp server:', (error as Error).message);
 		throw error;
 	}
 }
@@ -34,24 +34,26 @@ export const GET: RequestHandler = async () => {
 	try {
 		const data = await makeWhatsAppRequest('/whatsapp-status');
 		return json(data);
-	} catch (error) {
-		console.error('Error fetching WhatsApp status:', error.message);
-		return json(
-			{
-				success: false,
-				error: 'Failed to connect to WhatsApp server',
-				status: 'disconnected',
-				clientInfo: {
-					isConnected: false,
-					isAuthenticated: false,
-					phoneNumber: null
-				},
-				qrCode: null,
-				canStart: true, // Allow user to try starting even if status check failed
-				timestamp: new Date().toISOString()
+	} catch (error: unknown) {
+		console.error('Error fetching WhatsApp status:', (error as Error).message);
+		// Return 200 with "starting" status — this is expected during cold starts
+		// The WhatsApp server may still be booting up inside the same container
+		return json({
+			success: false,
+			error: 'WhatsApp server is starting up, please wait...',
+			status: 'starting',
+			clientInfo: {
+				isConnected: false,
+				isAuthenticated: false,
+				phoneNumber: null
 			},
-			{ status: 500 }
-		);
+			qrCode: null,
+			canStart: true,
+			canStop: false,
+			canDeleteAuth: false,
+			authExists: false,
+			timestamp: new Date().toISOString()
+		});
 	}
 };
 
