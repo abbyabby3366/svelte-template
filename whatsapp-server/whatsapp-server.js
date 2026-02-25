@@ -1,15 +1,18 @@
-const express = require('express');
-const {
-	makeWASocket,
-	DisconnectReason,
-	useMultiFileAuthState
-} = require('@whiskeysockets/baileys');
-const { Boom } = require('@hapi/boom');
-const path = require('path');
-const qrcode = require('qrcode-terminal');
+import express from 'express';
+import makeWASocket, { DisconnectReason, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
+import { useRedisAuthStateWithHSet, deleteHSetKeys } from 'baileys-redis-auth';
+import Redis from 'ioredis';
+import { Boom } from '@hapi/boom';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import qrcode from 'qrcode-terminal';
+import dotenv from 'dotenv';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Load environment variables from parent directory .env file
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
 const app = express();
 const PORT = process.env.WHATSAPP_SERVER_PORT || 3182;
@@ -52,20 +55,39 @@ let clientInfo = {
 };
 let sock = null;
 
-// Initialize WhatsApp socket with Baileys
+// Initialize WhatsApp socket with Baileys using Redis Auth
 async function initializeWhatsApp() {
-	const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
+	const redisOptions = {
+		host: process.env.REDIS_HOST,
+		port: parseInt(process.env.REDIS_PORT),
+		password: process.env.REDIS_PASSWORD
+	};
+
+	console.log(`🔌 Connecting to Redis at ${redisOptions.host}:${redisOptions.port}...`);
+
+	const {
+		state,
+		saveCreds,
+		redis: authRedisInstance
+	} = await useRedisAuthStateWithHSet(redisOptions, process.env.BAILEYS_AUTH_ID, console.log);
+
+	console.log(`✅ Redis connected. Using session ID: ${process.env.BAILEYS_AUTH_ID}`);
+
+	// Fetch latest Baileys version
+	const { version, isLatest } = await fetchLatestBaileysVersion();
+	console.log(`Using WhatsApp version: ${version.join('.')}, isLatest: ${isLatest}`);
 
 	sock = makeWASocket({
-		auth: state
-		// printQRInTerminal: false, // Handle manual QR printing
-		// browser: ['WhatsApp Server', 'Chrome', '1.0.0'],
-		// syncFullHistory: false,
-		// markOnlineOnConnect: true
+		auth: state,
+		version,
+		printQRInTerminal: false
 	});
 
 	// Save credentials when they update
 	sock.ev.on('creds.update', saveCreds);
+
+	// Store redis instance on sock for later use
+	sock.authRedis = authRedisInstance;
 
 	return sock;
 }
@@ -86,18 +108,26 @@ function setupEventHandlers(socket) {
 		}
 
 		if (connection === 'close') {
-			const shouldReconnect =
-				lastDisconnect?.error instanceof Boom
-					? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
-					: true;
+			const statusCode =
+				lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.data?.attrs?.code;
+			const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-			console.log('🔌 WhatsApp client disconnected:', lastDisconnect?.error);
+			console.log(`🔌 WhatsApp client disconnected. Status Code: ${statusCode}`);
 
 			if (shouldReconnect) {
-				console.log('🔄 Attempting to reconnect...');
+				console.log('🔄 Attempting to reconnect in 5 seconds...');
 				whatsappStatus = 'reconnecting';
+				setTimeout(async () => {
+					try {
+						const newSock = await initializeWhatsApp();
+						setupEventHandlers(newSock);
+					} catch (err) {
+						console.error('❌ Failed to reconnect:', err.message);
+						whatsappStatus = 'error';
+					}
+				}, 5000);
 			} else {
-				console.log('🚪 Logged out, please scan QR code again');
+				console.log('🚪 Logged out or session invalid. Please scan QR code again.');
 				whatsappStatus = 'disconnected';
 			}
 
@@ -106,6 +136,16 @@ function setupEventHandlers(socket) {
 			clientInfo.isConnected = false;
 			clientInfo.isAuthenticated = false;
 			clientInfo.phoneNumber = null;
+
+			// Cleanup Redis connection if it exists
+			if (socket.authRedis) {
+				console.log('🔌 Closing Redis connection on disconnect...');
+				try {
+					socket.authRedis.disconnect();
+				} catch (e) {
+					console.error('⚠️ Error closing Redis:', e.message);
+				}
+			}
 		} else if (connection === 'open') {
 			console.log('✅ WhatsApp client is connected and authenticated!');
 			whatsappStatus = 'connected';
@@ -171,11 +211,8 @@ app.get('/whatsapp-status', (req, res) => {
 	console.log('🔍 QR Code length:', qrCode ? qrCode.length : 'null');
 	console.log('🔍 Client info:', clientInfo);
 
-	// Check if auth folder exists
-	const fs = require('fs');
-	const path = require('path');
-	const authDir = path.join(__dirname, 'auth_info_baileys');
-	const authExists = fs.existsSync(authDir);
+	// Check if auth exists (configured in Redis)
+	const authExists = !!process.env.BAILEYS_AUTH_ID;
 
 	// Determine control states
 	const canStart =
@@ -383,36 +420,54 @@ app.post('/stop-whatsapp', async (req, res) => {
 	}
 });
 
-// Delete auth folder
+// Delete auth folder (Clear Redis keys)
 app.post('/delete-auth', async (req, res) => {
 	try {
-		const fs = require('fs').promises;
-		const path = require('path');
-
-		const authDir = path.join(__dirname, 'auth_info_baileys');
-
-		// Check if auth directory exists - IDEMPOTENT: continue even if it doesn't exist
-		try {
-			await fs.access(authDir);
-		} catch (err) {
-			// Folder doesn't exist, but we should still proceed to reset state
-			console.log('ℹ️ Auth folder does not exist, proceeding to reset state anyway');
-		}
+		console.log('🗑️ Deleting WhatsApp authentication from Redis...');
 
 		// Stop WhatsApp if running
 		if (sock) {
 			console.log('🛑 Stopping WhatsApp before deleting auth...');
-			if (sock.ev) {
-				sock.ev.removeAllListeners();
-			}
-			if (sock.ws) {
-				sock.ws.close();
+			try {
+				if (sock.ev) {
+					sock.ev.removeAllListeners();
+				}
+				if (sock.ws) {
+					sock.ws.close();
+				}
+
+				// If we have the redis instance from the socket, use it
+				if (sock.authRedis) {
+					await deleteHSetKeys({
+						redis: sock.authRedis,
+						key: process.env.BAILEYS_AUTH_ID
+					});
+					console.log(
+						`✅ HSet data for session '${process.env.BAILEYS_AUTH_ID}' deleted using socket redis instance.`
+					);
+				}
+			} catch (err) {
+				console.warn('⚠️ Error during socket cleanup:', err.message);
 			}
 			sock = null;
-		}
+		} else {
+			// If socket not active, create a temporary redis client to delete the keys
+			const redisOptions = {
+				host: process.env.REDIS_HOST,
+				port: parseInt(process.env.REDIS_PORT),
+				password: process.env.REDIS_PASSWORD
+			};
 
-		// Delete the auth directory
-		await fs.rm(authDir, { recursive: true, force: true });
+			const tempRedis = new Redis(redisOptions);
+			await deleteHSetKeys({
+				redis: tempRedis,
+				key: process.env.BAILEYS_AUTH_ID
+			});
+			tempRedis.disconnect();
+			console.log(
+				`✅ HSet data for session '${process.env.BAILEYS_AUTH_ID}' deleted using temporary redis client.`
+			);
+		}
 
 		// Reset all status
 		whatsappStatus = 'auth_deleted';
@@ -424,18 +479,16 @@ app.post('/delete-auth', async (req, res) => {
 			phoneNumber: null
 		};
 
-		console.log('🗑️ Auth folder deleted successfully');
-
 		res.json({
 			success: true,
-			message: 'Auth folder deleted successfully. WhatsApp will need to be re-authenticated.',
+			message: 'Authentication data deleted from Redis successfully.',
 			timestamp: new Date().toISOString()
 		});
 	} catch (error) {
 		console.error('❌ Error deleting auth folder:', error);
 		res.status(500).json({
 			success: false,
-			error: 'Failed to delete auth folder'
+			error: 'Failed to delete authentication data from Redis'
 		});
 	}
 });
