@@ -1,10 +1,16 @@
-<script>
+<script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+
+	interface ClientInfo {
+		isConnected: boolean;
+		isAuthenticated: boolean;
+		phoneNumber: string | null;
+	}
 
 	let status = $state('Loading...');
 	let statusClass = $state('status-connecting');
-	let clientInfo = $state(null);
-	let qrCode = $state(null);
+	let clientInfo = $state<ClientInfo | null>(null);
+	let qrCode = $state<string | null>(null);
 	let actionResponse = $state('');
 	let showActionResponse = $state(false);
 	let showQr = $state(false);
@@ -18,19 +24,20 @@
 	let msgContent = $state('');
 	let messageResponse = $state('');
 	let showMessageResponse = $state(false);
+	let baseUrl = $state('https://your-domain.com');
 	let canStart = $state(true);
 	let canStop = $state(false);
 	let canDeleteAuth = $state(false);
 
-	let pollInterval;
+	let pollInterval: ReturnType<typeof setInterval> | undefined;
 
 	// All API calls go through the SvelteKit proxy at /api/whatsapp/*
-	async function apiCall(endpoint, method = 'GET', body = null) {
+	async function apiCall(endpoint: string, method = 'GET', body: any = null) {
 		showActionResponse = true;
 		actionResponse = `Calling ${endpoint}...`;
 
 		try {
-			const options = {
+			const options: RequestInit = {
 				method,
 				headers: { 'Content-Type': 'application/json' }
 			};
@@ -46,7 +53,7 @@
 			}
 
 			return data;
-		} catch (error) {
+		} catch (error: any) {
 			actionResponse = `Error: ${error.message}`;
 			return null;
 		}
@@ -117,7 +124,7 @@
 			});
 			const data = await res.json();
 			pairingResponse = JSON.stringify(data, null, 2);
-		} catch (e) {
+		} catch (e: any) {
 			pairingResponse = 'Error: ' + e.message;
 		}
 	}
@@ -139,12 +146,13 @@
 			});
 			const data = await res.json();
 			messageResponse = JSON.stringify(data, null, 2);
-		} catch (e) {
+		} catch (e: any) {
 			messageResponse = 'Error: ' + e.message;
 		}
 	}
 
 	onMount(() => {
+		baseUrl = window.location.origin;
 		refreshStatus();
 		pollInterval = setInterval(refreshStatus, 5000);
 	});
@@ -243,6 +251,24 @@
 			{#if showMessageResponse}
 				<div class="response-area">{messageResponse}</div>
 			{/if}
+
+			<div class="api-documentation">
+				<hr />
+				<h4>API Integration</h4>
+				<p>You can send messages programmatically using this endpoint:</p>
+				<div class="endpoint">
+					<span class="method">POST</span>
+					<code>{baseUrl}/api/whatsapp/send-message</code>
+				</div>
+
+				<h5>Example CURL</h5>
+				<pre class="code-block">curl -X POST {baseUrl}/api/whatsapp/send-message \
+  -H "Content-Type: application/json" \
+  -d '{`{`}
+  "phoneNumber": "60123456789",
+  "message": "Hello from API!"
+{`}`}'</pre>
+			</div>
 		</div>
 	</div>
 </div>
@@ -397,5 +423,60 @@
 	summary {
 		cursor: pointer;
 		color: #666;
+	}
+
+	.api-documentation {
+		margin-top: 20px;
+		font-size: 0.9rem;
+	}
+
+	.api-documentation hr {
+		border: 0;
+		border-top: 1px solid #eee;
+		margin: 20px 0;
+	}
+
+	.api-documentation h4 {
+		margin: 0 0 10px 0;
+		color: #555;
+		font-size: 1rem;
+	}
+
+	.api-documentation h5 {
+		margin: 15px 0 8px 0;
+		color: #777;
+		font-size: 0.85rem;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+	}
+
+	.endpoint {
+		background: #f1f3f5;
+		padding: 8px 12px;
+		border-radius: 6px;
+		display: flex;
+		align-items: center;
+		gap: 10px;
+	}
+
+	.method {
+		background: #4dabf7;
+		color: white;
+		padding: 2px 6px;
+		border-radius: 4px;
+		font-weight: bold;
+		font-size: 0.75rem;
+	}
+
+	.code-block {
+		background: #212529;
+		color: #f8f9fa;
+		padding: 15px;
+		border-radius: 8px;
+		font-family: 'Fira Code', 'Courier New', Courier, monospace;
+		font-size: 0.8rem;
+		line-height: 1.4;
+		overflow-x: auto;
+		border: 1px solid #343a40;
 	}
 </style>

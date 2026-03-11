@@ -12,7 +12,8 @@
 		"format": "prettier --write .",
 		"lint": "prettier --check . && eslint .",
 		"init-admin": "node scripts/init-admin.mjs",
-		"force-update-admin": "node scripts/force-update-admin.mjs"
+		"force-update-admin": "node scripts/force-update-admin.mjs",
+		"wa": "node whatsapp-server/whatsapp-server.js"
 	},
 	"files": [
 		"dist",

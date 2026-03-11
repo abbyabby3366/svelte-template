@@ -21,7 +21,7 @@ async function makeWhatsAppRequest(endpoint: string, options: RequestInit = {}) 
 		}
 
 		return await response.json();
-	} catch (error) {
+	} catch (error: any) {
 		console.error('Error communicating with WhatsApp server:', error.message);
 		throw error;
 	}
@@ -32,7 +32,7 @@ export const GET: RequestHandler = async () => {
 	try {
 		const data = await makeWhatsAppRequest('/whatsapp-status');
 		return json(data);
-	} catch (error) {
+	} catch (error: any) {
 		console.error('Error fetching WhatsApp status:', error.message);
 		return json(
 			{
