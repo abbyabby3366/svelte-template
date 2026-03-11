@@ -20,10 +20,13 @@
 	let pairingPhone = $state('');
 	let pairingResponse = $state('');
 	let showPairingResponse = $state(false);
-	let msgPhone = $state('');
+	let msgPhone = $state('60122273341');
 	let msgContent = $state('');
 	let messageResponse = $state('');
 	let showMessageResponse = $state(false);
+	let groupList = $state<any[]>([]);
+	let showGroups = $state(false);
+	let groupResponse = $state('');
 	let baseUrl = $state('https://your-domain.com');
 	let canStart = $state(true);
 	let canStop = $state(false);
@@ -151,6 +154,25 @@
 		}
 	}
 
+	async function fetchGroups() {
+		showGroups = true;
+		groupResponse = 'Fetching groups...';
+		groupList = [];
+
+		try {
+			const res = await fetch('/api/whatsapp/get-groups');
+			const data = await res.json();
+			if (data.success) {
+				groupList = data.groups || [];
+				groupResponse = `Found ${groupList.length} groups.`;
+			} else {
+				groupResponse = 'Error: ' + data.error;
+			}
+		} catch (e: any) {
+			groupResponse = 'Error: ' + e.message;
+		}
+	}
+
 	onMount(() => {
 		baseUrl = window.location.origin;
 		refreshStatus();
@@ -255,21 +277,84 @@
 			<div class="api-documentation">
 				<hr />
 				<h4>API Integration</h4>
-				<p>You can send messages programmatically using this endpoint:</p>
+				<p>
+					You can send messages programmatically using this endpoint. It supports both raw numbers
+					(e.g., 6012...) and full WhatsApp IDs (including Group JIDs).
+				</p>
 				<div class="endpoint">
 					<span class="method">POST</span>
 					<code>{baseUrl}/api/whatsapp/send-message</code>
 				</div>
 
-				<h5>Example CURL</h5>
+				<h5>Example CURL (to Phone)</h5>
 				<pre class="code-block">curl -X POST {baseUrl}/api/whatsapp/send-message \
   -H "Content-Type: application/json" \
   -d '{`{`}
-  "phoneNumber": "60123456789",
+  "phoneNumber": "60122273341",
   "message": "Hello from API!"
 {`}`}'</pre>
+
+				<h5>Example CURL (to Group)</h5>
+				<pre class="code-block">curl -X POST {baseUrl}/api/whatsapp/send-message \
+  -H "Content-Type: application/json" \
+  -d '{`{`}
+  "phoneNumber": "123456789012345678@g.us",
+  "message": "Hello Group!"
+{`}`}'</pre>
+
+				<hr />
+				<h4>Get Groups</h4>
+				<p>Retrieve all participating groups and their IDs:</p>
+				<div class="endpoint">
+					<span class="method">GET</span>
+					<code>{baseUrl}/api/whatsapp/get-groups</code>
+				</div>
 			</div>
 		</div>
+	</div>
+
+	<div class="card" style="margin-top: 20px;">
+		<h3>WhatsApp Groups</h3>
+		<p>List all groups your account is currently in to get their JIDs.</p>
+		<button onclick={fetchGroups} class="btn-primary" disabled={!clientInfo?.isConnected}>
+			Fetch My Groups
+		</button>
+
+		{#if showGroups}
+			<div class="response-area" style="max-height: 400px;">
+				<p style="margin-bottom: 10px; font-weight: bold;">{groupResponse}</p>
+				{#if groupList.length > 0}
+					<table class="groups-table">
+						<thead>
+							<tr>
+								<th>Group Name</th>
+								<th>JID (Group ID)</th>
+								<th>Action</th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each groupList as group}
+								<tr>
+									<td>{group.subject}</td>
+									<td><code>{group.id}</code></td>
+									<td>
+										<button
+											class="btn-small"
+											onclick={() => {
+												msgPhone = group.id;
+												document.getElementById('msg-content')?.focus();
+											}}
+										>
+											Use ID
+										</button>
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				{/if}
+			</div>
+		{/if}
 	</div>
 </div>
 
@@ -478,5 +563,38 @@
 		line-height: 1.4;
 		overflow-x: auto;
 		border: 1px solid #343a40;
+		margin-bottom: 10px;
+	}
+
+	.groups-table {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: 13px;
+	}
+
+	.groups-table th,
+	.groups-table td {
+		text-align: left;
+		padding: 8px;
+		border-bottom: 1px solid #eee;
+	}
+
+	.groups-table th {
+		color: #666;
+		text-transform: uppercase;
+		font-size: 11px;
+	}
+
+	.btn-small {
+		padding: 4px 8px;
+		font-size: 12px;
+		margin: 0;
+		background-color: #f1f3f5;
+		color: #333;
+		border: 1px solid #dee2e6;
+	}
+
+	.btn-small:hover {
+		background-color: #e9ecef;
 	}
 </style>

@@ -172,16 +172,19 @@ async function sendWhatsAppMessage(phoneNumber, message) {
 	}
 
 	try {
-		// Validate phone number format
-		const cleanPhone = phoneNumber.replace(/[^\d]/g, '');
-		if (cleanPhone.length < 10) {
-			return { success: false, error: 'Invalid phone number format' };
-		}
+		let jid;
 
-		// Format JID properly for Baileys (WhatsApp ID)
-		const jid = cleanPhone.includes('@s.whatsapp.net')
-			? cleanPhone
-			: `${cleanPhone}@s.whatsapp.net`;
+		// Check if it's already a full JID
+		if (phoneNumber.includes('@')) {
+			jid = phoneNumber;
+		} else {
+			// Validate and clean phone number if it's a raw number
+			const cleanPhone = phoneNumber.replace(/[^\d]/g, '');
+			if (cleanPhone.length < 10) {
+				return { success: false, error: 'Invalid phone number format' };
+			}
+			jid = `${cleanPhone}@s.whatsapp.net`;
+		}
 
 		// Send message using Baileys
 		const result = await sock.sendMessage(jid, { text: message });
@@ -323,6 +326,41 @@ app.post('/send-message', async (req, res) => {
 		res.status(500).json({
 			success: false,
 			error: 'Internal server error'
+		});
+	}
+});
+
+// Get all groups
+app.get('/get-groups', async (req, res) => {
+	try {
+		if (!sock || !clientInfo.isConnected) {
+			return res.status(400).json({
+				success: false,
+				error: 'WhatsApp socket not connected'
+			});
+		}
+
+		console.log('📡 Fetching all participating groups...');
+		const groups = await sock.groupFetchAllParticipating();
+		
+		// Format the response to be cleaner
+		const formattedGroups = Object.values(groups).map(group => ({
+			id: group.id,
+			subject: group.subject,
+			participantsCount: group.participants.length,
+			creation: group.creation
+		}));
+
+		res.json({
+			success: true,
+			groups: formattedGroups,
+			timestamp: new Date().toISOString()
+		});
+	} catch (error) {
+		console.error('❌ Error fetching groups:', error);
+		res.status(500).json({
+			success: false,
+			error: 'Failed to fetch groups'
 		});
 	}
 });
@@ -514,5 +552,6 @@ app.listen(PORT, () => {
 	console.log('   POST /delete-auth - Delete authentication data (requires re-authentication)');
 	console.log('   POST /request-pairing-code - Generate pairing code for authentication');
 	console.log('   POST /send-message - Send custom messages');
+	console.log('   GET  /get-groups - Get all participating groups');
 	console.log('   GET  /health - Health check');
 });
