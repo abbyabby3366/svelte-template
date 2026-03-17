@@ -162,8 +162,23 @@ function setupEventHandlers(socket) {
 	});
 }
 
-// WhatsApp is not started automatically - wait for user to press "Start WhatsApp" button
-console.log('⏳ WhatsApp not started automatically. Use /start-whatsapp endpoint to begin.');
+// Auto-start WhatsApp connection if configured (defaults to true)
+const AUTO_START = process.env.AUTO_START_WHATSAPP !== 'false';
+
+if (AUTO_START) {
+	console.log('🚀 Auto-starting WhatsApp connection...');
+	initializeWhatsApp()
+		.then((newSock) => {
+			sock = newSock;
+			setupEventHandlers(newSock);
+		})
+		.catch((err) => {
+			console.error('❌ Failed to auto-start WhatsApp:', err.message);
+			whatsappStatus = 'error';
+		});
+} else {
+	console.log('⏳ WhatsApp not started automatically. Use /start-whatsapp endpoint to begin.');
+}
 
 // Function to send WhatsApp message using Baileys
 async function sendWhatsAppMessage(phoneNumber, message) {
